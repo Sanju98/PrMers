@@ -669,6 +669,22 @@ int App::runECMMarin()
 
     const int backup_period = options.backup_interval > 0 ? options.backup_interval : 10;
     //const std::string ckpt2 = "ecm2_m_p" + std::to_string(p) + "_curve" + std::to_string(curve_seed) + ".ckpt2";
+
+    // --- L3 (H2 precursor): hoist the ECM engine out of the per-curve loop. ---
+    // Previously a fresh engine was built (engine::create_gpu) and torn down
+    // (delete eng) on every curve. That rebuilt the entire engine each time:
+    // OpenCL program reload, 51-register allocation, and roots/weights/widths
+    // upload (see engine_gpu.h). Curves are independent and every curve fully
+    // re-initialises the register state it reads (sigma/point/A24/B1 are all
+    // written via set_mpz/copy/set before stage 1), so no per-curve register
+    // state leaks across iterations. We therefore build the engine ONCE here and
+    // reuse it for all curves; it is deleted exactly once after the loop (or on
+    // the function-exit paths below). This removes K-1 program reloads and
+    // K-1 full buffer (re)allocations.
+    engine* eng = engine::create_gpu(p, static_cast<size_t>(51), static_cast<size_t>(options.device_id), verbose);
+    if (!eng) { std::cout<<"[ECM] GPU engine unavailable\n"; write_result(); publish_json(); return 1; }
+    if (transform_size_once == 0) { transform_size_once = eng->get_size(); rebuild_s2_layout(transform_size_once); std::ostringstream os; os<<"[ECM] Transform size="<<transform_size_once<<" words, device_id="<<options.device_id; std::cout<<os.str()<<std::endl; if (guiServer_) guiServer_->appendLog(os.str()); }
+
     for (uint64_t c = 0; c < curves; ++c)
     {
         result_factor = 0;
@@ -687,10 +703,7 @@ int App::runECMMarin()
         const std::string ckpt_file = "ecm_m_"  + std::to_string(p) + "_c" + std::to_string(c) + ".ckpt";
         const std::string ckpt2     = "ecm2_m_" + std::to_string(p) + "_c" + std::to_string(c) + ".ckpt";
 
-        engine* eng = engine::create_gpu(p, static_cast<size_t>(51), static_cast<size_t>(options.device_id), verbose);
-        if (!eng) { std::cout<<"[ECM] GPU engine unavailable\n"; write_result(); publish_json(); return 1; }
-        if (transform_size_once == 0) { transform_size_once = eng->get_size(); rebuild_s2_layout(transform_size_once); std::ostringstream os; os<<"[ECM] Transform size="<<transform_size_once<<" words, device_id="<<options.device_id; std::cout<<os.str()<<std::endl; if (guiServer_) guiServer_->appendLog(os.str()); }
-
+        // Engine is hoisted above the loop (L3); reused across curves.
         mpz_class s2_base_Xpos, s2_base_Ypos, s2_base_Tpos;
         mpz_class s2_base_Xneg, s2_base_Yneg, s2_base_Tneg;
         bool have_s2_base_cache = false;
@@ -1347,13 +1360,13 @@ int App::runECMMarin()
                     if (!known) { options.knownFactors.push_back(g.get_str()); result_factor=g; result_status="found"; }
                     else { result_factor=0; result_status="NF"; }
                     curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1);
-                    write_result(); publish_json(); delete eng; continue;
+                    write_result(); publish_json(); continue;
                 }
 
                 mpz_class t0 = mulm(mpz_class(4), mulm(mulm(sqrm(u), u), v));
                 mpz_class invt; { int r = invm(t0, invt);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
 
                 mpz_class tnum = mulm(sqrm(subm(v,u)), subm(v,u));
@@ -1361,8 +1374,8 @@ int App::runECMMarin()
                 Araw = mulm(Araw, invt);
                 mpz_class A = subm(Araw, mpz_class(2));
                 mpz_class inv4; { int r = invm(mpz_class(4), inv4);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 A24 = mulm(addm(A, mpz_class(2)), inv4);
                 mpz_class u3 = mulm(sqrm(u), u);
@@ -1370,8 +1383,8 @@ int App::runECMMarin()
                 mpz_class invv3;
                 {
                     int r = invm(v3, invv3);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 x0 = mulm(u3, invv3);
 
@@ -1381,22 +1394,22 @@ int App::runECMMarin()
                 mpz_class inv_denA;
                 {
                     int r = invm(denA, inv_denA);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 mpz_class Aplus2 = mulm(mulm(tnum, addm(mulm(mpz_class(3), su), sv)), inv_denA);
                 mpz_class inv_sv;
                 {
                     int r = invm(sv, inv_sv);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 mpz_class Bm = mulm(su, inv_sv);
                 mpz_class invBm;
                 {
                     int r = invm(Bm, invBm);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 te_aE = mulm(Aplus2, invBm);
                 te_dE = mulm(subm(Aplus2, mpz_class(4)), invBm);
@@ -1405,8 +1418,8 @@ int App::runECMMarin()
                 mpz_class inv_denX;
                 {
                     int r = invm(denX, inv_denX);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 te_X0 = mulm(mulm(sqrm(su), sv), inv_denX);
                 mpz_class su3 = mulm(sqrm(su), su);
@@ -1415,8 +1428,8 @@ int App::runECMMarin()
                 mpz_class inv_denY;
                 {
                     int r = invm(denY, inv_denY);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 te_Y0 = mulm(subm(su3, sv3), inv_denY);
                 use_te_stage1 = true;
@@ -1472,21 +1485,21 @@ int App::runECMMarin()
                 options.sigma_hex = ss.str();
                 mpz_class s = mpz_class(4), t = mpz_class(8);
                 int rmul = ec_mul(k, s, t, s, t);
-                if (rmul==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                if (rmul<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                if (rmul==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                if (rmul<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
 
                 mpz_class den = subm(s, mpz_class(4));
                 mpz_class inv; { int r = invm(den, inv);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 mpz_class alpha = mulm(addm(t, mpz_class(8)), inv);
 
                 mpz_class numr = addm(mpz_class(8), mulm(mpz_class(2), alpha));
                 mpz_class denr = subm(mpz_class(8), sqrm(alpha));
                 mpz_class invdenr; { int r = invm(denr, invdenr);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 mpz_class rpar = mulm(numr, invdenr);
 
@@ -1496,19 +1509,19 @@ int App::runECMMarin()
                 mpz_class A_num = addm(subm(addm(subm(mulm(mpz_class(8), r4), mulm(mpz_class(16), r3)), mulm(mpz_class(16), r2)), mulm(mpz_class(8), rpar)), mpz_class(1));
                 mpz_class A_den = mulm(mpz_class(4), r2);
                 mpz_class invAden; { int r = invm(A_den, invAden);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 mpz_class A = mulm(A_num, invAden);
                 mpz_class inv4; { int r = invm(mpz_class(4), inv4);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 A24 = mulm(addm(A, mpz_class(2)), inv4);
 
                 mpz_class inv2; { int r = invm(mpz_class(2), inv2);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 x0 = subm(inv2, r2);
 
@@ -1527,16 +1540,16 @@ int App::runECMMarin()
                 mpz_class a2 = sqrm(a);
                 mpz_class denv = subm(mulm(mpz_class(48), a2), mpz_class(1));
                 mpz_class invdenv; { int r = invm(denv, invdenv);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 mpz_class v = mulm(mulm(mpz_class(4), a2), invdenv);
                 mpz_class fourv = mulm(mpz_class(4), v);
                 mpz_class one = mpz_class(1);
                 mpz_class A = subm(mpz_class(0), addm(sqrm(addm(fourv, one)), mulm(mpz_class(16), v)));
                 mpz_class inv4; { int r = invm(mpz_class(4), inv4);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 A24 = mulm(addm(A, mpz_class(2)), inv4);
                 x0 = addm(mulm(mpz_class(4), v), mpz_class(1));
@@ -1574,21 +1587,21 @@ int App::runECMMarin()
                     if (!known) { options.knownFactors.push_back(g.get_str()); result_factor=g; result_status="found"; }
                     else { result_factor=0; result_status="NF"; }
                     curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1);
-                    write_result(); publish_json(); delete eng; continue;
+                    write_result(); publish_json(); continue;
                 }
 
                 mpz_class t0 = mulm(mpz_class(4), mulm(mulm(sqrm(u), u), v));
                 mpz_class invt; { int r = invm(t0, invt);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 mpz_class tnum = mulm(sqrm(subm(v,u)), subm(v,u));
                 mpz_class Araw = mulm(tnum, addm(mulm(mpz_class(3),u), v));
                 Araw = mulm(Araw, invt);
                 mpz_class A = subm(Araw, mpz_class(2));
                 mpz_class inv4; { int r = invm(mpz_class(4), inv4);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 A24 = mulm(addm(A, mpz_class(2)), inv4);
                 mpz_class u3 = mulm(sqrm(u), u);
@@ -1596,8 +1609,8 @@ int App::runECMMarin()
                 mpz_class invv3;
                 {
                     int r = invm(v3, invv3);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 x0 = mulm(u3, invv3);
                 mpz_class aE = addm(A, mpz_class(2));
@@ -1617,16 +1630,16 @@ int App::runECMMarin()
                 mpz_class a2 = sqrm(a);
                 mpz_class denv = subm(mulm(mpz_class(48), a2), mpz_class(1));
                 mpz_class invdenv; { int r = invm(denv, invdenv);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 mpz_class v = mulm(mulm(mpz_class(4), a2), invdenv);
                 mpz_class fourv = mulm(mpz_class(4), v);
                 mpz_class one = mpz_class(1);
                 mpz_class A = subm(mpz_class(0), addm(sqrm(addm(fourv, one)), mulm(mpz_class(16), v)));
                 mpz_class inv4; { int r = invm(mpz_class(4), inv4);
-                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
-                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); delete eng; continue; }
+                    if (r==1){ curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
+                    if (r<0){ result_factor=0; result_status="NF"; curves_tested_for_found=(uint32_t)(c+1); options.curves_tested_for_found=(uint32_t)(c+1); write_result(); publish_json(); continue; }
                 }
                 A24 = mulm(addm(A, mpz_class(2)), inv4);
                 x0 = addm(mulm(mpz_class(4), v), mpz_class(1));
@@ -1766,7 +1779,7 @@ int App::runECMMarin()
             if (!use_te_stage1) {
                 mpz_class Zfin = compute_X_with_dots(eng, (engine::Reg)1, N);
                 gg = gcd_with_dots(Zfin, N);
-                if (gg == N) { std::cout<<"[ECM] Curve "<<(c+1)<<": singular or failure, retrying\n"; delete eng; continue; }
+                if (gg == N) { std::cout<<"[ECM] Curve "<<(c+1)<<": singular or failure, retrying\n"; continue; }
                 if (gg == 1) {
                     mpz_class Xv = compute_X_with_dots(eng, (engine::Reg)0, N);
                     mpz_class invZ;
@@ -1775,7 +1788,7 @@ int App::runECMMarin()
             } else {
                 mpz_class Tfin = compute_X_with_dots(eng, (engine::Reg)5, N);
                 gg = gcd_with_dots(Tfin, N);
-                if (gg == N) { std::cout<<"[ECM] Curve "<<(c+1)<<": singular or failure, retrying\n"; delete eng; continue; }
+                if (gg == N) { std::cout<<"[ECM] Curve "<<(c+1)<<": singular or failure, retrying\n"; continue; }
                 if (gg == 1) {
                     mpz_class Zv = compute_X_with_dots(eng, (engine::Reg)1, N);
                     mpz_class Yv = compute_X_with_dots(eng, (engine::Reg)4, N);
@@ -1816,7 +1829,6 @@ int App::runECMMarin()
                 options.B2 = 0;
                 write_result(); publish_json();
                 options.B2 = B2;
-                delete eng;
                 continue;
             }
             else{
@@ -1870,7 +1882,8 @@ int App::runECMMarin()
                     result_status = "NF";
                 }
 
-                delete eng;
+                // Engine is NOT deleted here (hoisted, reused across curves).
+                // Callers that exit the function on rc==2 delete it explicitly.
                 return known ? 1 : 2;
             };
 
@@ -2046,7 +2059,7 @@ int App::runECMMarin()
 
                     if (!resume_this_chunk) {
                         int setup_rc = setup_te_stage2_base();
-                        if (setup_rc == 2) return 0;
+                        if (setup_rc == 2) { delete eng; return 0; }
                         if (setup_rc == 1) {
                             handled_known_factor = true;
                             break;
@@ -2112,7 +2125,7 @@ int App::runECMMarin()
                     if (gz > 1 && gz < N) {
                         std::cout << std::endl;
                         int factor_rc = publish_stage2_factor(gz);
-                        if (factor_rc == 2) return 0;
+                        if (factor_rc == 2) { delete eng; return 0; }
                         handled_known_factor = true;
                         break;
                     }
@@ -2158,7 +2171,6 @@ int App::runECMMarin()
                     std::error_code ec0;
                     fs::remove(ckpt_file, ec0); fs::remove(ckpt_file + ".old", ec0); fs::remove(ckpt_file + ".new", ec0);
                     fs::remove(ckpt2, ec0); fs::remove(ckpt2 + ".old", ec0); fs::remove(ckpt2 + ".new", ec0);
-                    delete eng;
                     continue;
                 }
 
@@ -2209,10 +2221,9 @@ auto setup_stage2_base = [&]() -> int {
 
             if (!resume_stage2) {
                 int setup_rc = setup_stage2_base();
-                if (setup_rc == 2) return 0;
+                if (setup_rc == 2) { delete eng; return 0; }
                 if (setup_rc == 1) continue;
                 if (setup_rc < 0) {
-                    delete eng;
                     continue;
                 }
             } else {
@@ -2361,7 +2372,7 @@ auto setup_stage2_base = [&]() -> int {
                     if (gz > 1 && gz < N) {
                         std::cout << std::endl;
                         int factor_rc = publish_stage2_factor(gz);
-                        if (factor_rc == 2) return 0;
+                        if (factor_rc == 2) { delete eng; return 0; }
                         next_curve_after_stage2 = true;
                         break;
                     }
@@ -2372,7 +2383,7 @@ auto setup_stage2_base = [&]() -> int {
                         mpz_class gg_hit = result_factor > 1 ? result_factor : gz;
                         std::cout << std::endl;
                         int factor_rc = publish_stage2_factor(gg_hit);
-                        if (factor_rc == 2) return 0;
+                        if (factor_rc == 2) { delete eng; return 0; }
                         next_curve_after_stage2 = true;
                         break;
                     }
@@ -2430,7 +2441,6 @@ auto setup_stage2_base = [&]() -> int {
                 std::error_code ec0;
                 fs::remove(ckpt_file, ec0); fs::remove(ckpt_file + ".old", ec0); fs::remove(ckpt_file + ".new", ec0);
                 fs::remove(ckpt2, ec0); fs::remove(ckpt2 + ".old", ec0); fs::remove(ckpt2 + ".new", ec0);
-                delete eng;
                 continue;
             }
 
@@ -2443,7 +2453,7 @@ auto setup_stage2_base = [&]() -> int {
             bool found2 = (gg2 > 1 && gg2 < N);
             if (found2) {
                 int factor_rc = publish_stage2_factor(gg2);
-                if (factor_rc == 2) return 0;
+                if (factor_rc == 2) { delete eng; return 0; }
                 continue;
             }
             }
@@ -2451,8 +2461,9 @@ auto setup_stage2_base = [&]() -> int {
 
         std::error_code ec; fs::remove(ckpt_file, ec); fs::remove(ckpt_file + ".old", ec); fs::remove(ckpt_file + ".new", ec);
         { std::ostringstream fin; fin<<"[ECM] Curve "<<(c+1)<<"/"<<curves<<" done"; std::cout<<fin.str()<<std::endl; if (guiServer_) guiServer_->appendLog(fin.str()); }
-        delete eng;
+        // Engine reused across curves (hoisted); deleted once after the loop.
     }
+    delete eng;
 
     if (result_status != "found") {
         std::cout<<"[ECM] No factor found"<<std::endl;
