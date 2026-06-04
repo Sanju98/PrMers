@@ -513,11 +513,26 @@ public:
 protected:
 	void _read_buffer(cl_mem & mem, void * const ptr, const size_t size, const size_t offset = 0)
 	{
+#if defined(__APPLE__)
+		// On Apple (M-series) the host and device share physical RAM (unified memory).
+		// Map the device buffer into the host address space (near-zero-copy) instead of
+		// issuing a full blocking DMA copy, then memcpy the bytes into the caller's buffer.
+		// Semantics are identical to clEnqueueReadBuffer(CL_TRUE): callers still receive the
+		// exact bytes. We keep the _sync() so all prior in-flight GPU work has completed and
+		// the mapped contents are coherent before reading.
+		_sync();
+		cl_int err_map;
+		void * const mapped = clEnqueueMapBuffer(_queue, mem, CL_TRUE, CL_MAP_READ, offset, size, 0, nullptr, nullptr, &err_map);
+		fatal(err_map);
+		std::memcpy(ptr, mapped, size);
+		fatal(clEnqueueUnmapMemObject(_queue, mem, mapped, 0, nullptr, nullptr));
+#else
 		// Fill the buffer with random numbers to generate an error even if clEnqueueReadBuffer fails without error.
 		char * const cptr = static_cast<char *>(ptr);
 		for (size_t i = 0; i < size; ++i) cptr[i] = char(std::rand());
 		_sync();
 		fatal(clEnqueueReadBuffer(_queue, mem, CL_TRUE, offset, size, ptr, 0, nullptr, nullptr));
+#endif
 	}
 
 protected:

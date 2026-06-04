@@ -119,7 +119,13 @@ public:
 		const size_t n = _n;
 		if (n != 0)
 		{
+#if defined(__APPLE__)
+			// Unified memory: allocate the register file so the host can map it (near-zero-copy)
+			// for residue/checkpoint/Gerbicz reads instead of a full blocking DMA copy.
+			_reg = _create_buffer(CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, _reg_count * n * sizeof(uint64));
+#else
 			_reg = _create_buffer(CL_MEM_READ_WRITE, _reg_count * n * sizeof(uint64));
+#endif
 			_carry = _create_buffer(CL_MEM_READ_WRITE, n / 4 * sizeof(uint64));
 			_root = _create_buffer(CL_MEM_READ_ONLY, 3 * n * sizeof(uint64));
 			_weight = _create_buffer(CL_MEM_READ_ONLY, 2 * n * sizeof(uint64));
