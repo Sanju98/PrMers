@@ -9,7 +9,7 @@ organized by **implementation effort**. Findings come from reading the source
 - **Hardware audited:** Apple M4 Pro (14 CPU cores, 20-core GPU, OpenCL 1.2, no FP64).
 - **Active engine on Apple:** the **Marin** engine (`include/marin/`, `src/modes/RunPrpOrLlMarin.cpp`, `RunLlSafeMarin.cpp`). The older `NttEngine`/`kernels/prmers.cl` path ("Legacy") runs on other setups.
 - **Baseline:** ~1,059 iterations/sec for exponent 6,972,593 (FFT 327,680 words = 5·2¹⁶), ~5 GPU kernels per squaring.
-- **Status:** These are **static-analysis findings — read, not yet measured.** Validate each with an A/B IPS run before trusting the impact estimate.
+- **Status:** Originally **static-analysis findings** (read, not benchmarked). A subset has since been implemented and measured — see [Measured results](#measured-results-apple-m4-pro) at the end. Validate any remaining item with an A/B IPS run before trusting its impact estimate.
 
 ## Legend
 
@@ -149,3 +149,35 @@ organized by **implementation effort**. Findings come from reading the source
 7. **H3** — only if Apple becomes a primary target and the tweaks above prove insufficient.
 
 > Each item should be A/B-benchmarked with `./prmers 6972593 -ll` (or a fixed exponent) against the ~1,059 IPS baseline before and after.
+
+---
+
+## Measured results (Apple M4 Pro)
+
+Serial benchmarks (one GPU run at a time). **Baseline** = unmodified upstream
+PrMers; **Current** = this branch (M6 unified-memory reads + ECM engine hoist +
+the runtime-capability / RAII cleanup).
+
+### Latency score
+
+| workload | baseline | current | delta |
+|---|---|---|---|
+| **Lucas-Lehmer** `M216091 -ll` | 33.55 s  (≈6,440 IPS) | 33.49 s  (≈6,410 IPS) | **≈ 0% (no regression)** |
+| **ECM** `M9941 -b1 2000 -K 8` | 33.3 s | **24.1 s** | **−27%** |
+
+Both verdicts correct (LL → prime; ECM → identical work, no factor). The ECM
+win is the engine hoist removing K−1 per-curve engine rebuilds; LL is untouched
+on the hot path, so it holds at baseline.
+
+### Per-experiment verdicts (hypotheses → tested facts)
+
+| change | hypothesis | measured | kept? |
+|---|---|---|---|
+| **L1** Apple sync cadence | top win | **−24% (regression)** — Apple prefers frequent drains; hypothesis was backwards | ❌ rejected |
+| **L2** branchless reduce | faster butterfly | neutral | ❌ dropped (no benefit) |
+| **M6** unified-memory reads | fewer stalls | LL-neutral; shrinks checkpoint/Gerbicz stalls (not exercised by short runs) | ✅ kept |
+| **ECM hoist** (L3) | less per-curve overhead | **−27% ECM** | ✅ kept |
+
+Lesson: the audit's #1 pick (L1) was a regression on real silicon, while the
+unglamorous ECM-hoist + unified-memory changes are the keepers — **measure
+before merging.**
