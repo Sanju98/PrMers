@@ -228,6 +228,7 @@ private:
 	size_t _max_workgroup_size = 0;
 	cl_ulong _timer_resolution = 0;
 	EVendor _vendor = EVendor::Unknown;
+	bool _host_unified = false;
 	cl_context _context = nullptr;
 	cl_command_queue _queueF = nullptr;
 	cl_command_queue _queueP = nullptr;
@@ -270,6 +271,8 @@ public:
 		cl_ulong mem_const_size; fatal(clGetDeviceInfo(_device, CL_DEVICE_MAX_CONSTANT_BUFFER_SIZE, sizeof(mem_const_size), &mem_const_size, nullptr));
 		fatal(clGetDeviceInfo(_device, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(_max_workgroup_size), &_max_workgroup_size, nullptr));
 		fatal(clGetDeviceInfo(_device, CL_DEVICE_PROFILING_TIMER_RESOLUTION, sizeof(_timer_resolution), &_timer_resolution, nullptr));
+		cl_bool host_unified = CL_FALSE; clGetDeviceInfo(_device, CL_DEVICE_HOST_UNIFIED_MEMORY, sizeof(host_unified), &host_unified, nullptr);
+		_host_unified = (host_unified == CL_TRUE);
 
 		if (verbose)
 		{
@@ -314,6 +317,8 @@ public:
 	size_t get_max_local_worksize(const size_t type_size) const { return std::min(_max_workgroup_size, size_t(_local_mem_size) / type_size); }
 	size_t get_timer_resolution() const { return _timer_resolution; }
 	bool isIntel() const { return (_vendor == EVendor::INTEL); }
+	// Unified memory (host and device share physical RAM) -> residue reads can map instead of DMA-copy.
+	bool hasUnifiedMemory() const { return _host_unified; }
 
 private:
 	static EVendor get_vendor(const std::string & vendor_string)
@@ -513,26 +518,24 @@ public:
 protected:
 	void _read_buffer(cl_mem & mem, void * const ptr, const size_t size, const size_t offset = 0)
 	{
-#if defined(__APPLE__)
-		// On Apple (M-series) the host and device share physical RAM (unified memory).
-		// Map the device buffer into the host address space (near-zero-copy) instead of
-		// issuing a full blocking DMA copy, then memcpy the bytes into the caller's buffer.
-		// Semantics are identical to clEnqueueReadBuffer(CL_TRUE): callers still receive the
-		// exact bytes. We keep the _sync() so all prior in-flight GPU work has completed and
-		// the mapped contents are coherent before reading.
-		_sync();
-		cl_int err_map;
-		void * const mapped = clEnqueueMapBuffer(_queue, mem, CL_TRUE, CL_MAP_READ, offset, size, 0, nullptr, nullptr, &err_map);
-		fatal(err_map);
-		std::memcpy(ptr, mapped, size);
-		fatal(clEnqueueUnmapMemObject(_queue, mem, mapped, 0, nullptr, nullptr));
-#else
+		if (hasUnifiedMemory())
+		{
+			// Host and device share physical RAM: map the buffer into host address space
+			// (near-zero-copy) and memcpy out, instead of a full blocking DMA copy. Same bytes
+			// as clEnqueueReadBuffer(CL_TRUE); _sync() (below) guarantees coherence first.
+			_sync();
+			cl_int err_map;
+			void * const mapped = clEnqueueMapBuffer(_queue, mem, CL_TRUE, CL_MAP_READ, offset, size, 0, nullptr, nullptr, &err_map);
+			fatal(err_map);
+			std::memcpy(ptr, mapped, size);
+			fatal(clEnqueueUnmapMemObject(_queue, mem, mapped, 0, nullptr, nullptr));
+			return;
+		}
 		// Fill the buffer with random numbers to generate an error even if clEnqueueReadBuffer fails without error.
 		char * const cptr = static_cast<char *>(ptr);
 		for (size_t i = 0; i < size; ++i) cptr[i] = char(std::rand());
 		_sync();
 		fatal(clEnqueueReadBuffer(_queue, mem, CL_TRUE, offset, size, ptr, 0, nullptr, nullptr));
-#endif
 	}
 
 protected:

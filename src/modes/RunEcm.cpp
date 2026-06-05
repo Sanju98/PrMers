@@ -681,7 +681,10 @@ int App::runECMMarin()
     // reuse it for all curves; it is deleted exactly once after the loop (or on
     // the function-exit paths below). This removes K-1 program reloads and
     // K-1 full buffer (re)allocations.
-    engine* eng = engine::create_gpu(p, static_cast<size_t>(51), static_cast<size_t>(options.device_id), verbose);
+    // RAII ownership: the engine is freed automatically on every function-exit path
+    // (and at scope end), so no call site needs an explicit `delete eng`.
+    std::unique_ptr<engine> eng_owner(engine::create_gpu(p, static_cast<size_t>(51), static_cast<size_t>(options.device_id), verbose));
+    engine* eng = eng_owner.get();
     if (!eng) { std::cout<<"[ECM] GPU engine unavailable\n"; write_result(); publish_json(); return 1; }
     if (transform_size_once == 0) { transform_size_once = eng->get_size(); rebuild_s2_layout(transform_size_once); std::ostringstream os; os<<"[ECM] Transform size="<<transform_size_once<<" words, device_id="<<options.device_id; std::cout<<os.str()<<std::endl; if (guiServer_) guiServer_->appendLog(os.str()); }
 
@@ -1342,7 +1345,7 @@ int App::runECMMarin()
                 if (forceSigma) {
                     if (mpz_set_str(sigma_mpz.get_mpz_t(), options.sigma.c_str(), 0) != 0) {
                         std::cerr << "[ECM] Invalid -sigma value: " << options.sigma << std::endl;
-                        delete eng;
+                        
                         return 0;
                     }
                 } else {
@@ -1569,7 +1572,7 @@ int App::runECMMarin()
                 if (forceSigma) {
                     if (mpz_set_str(sigma_mpz.get_mpz_t(), options.sigma.c_str(), 0) != 0) {
                         std::cerr << "[ECM] Invalid -sigma value: " << options.sigma << std::endl;
-                        delete eng;
+                        
                         return 0;
                     }
                 } else {
@@ -1771,7 +1774,7 @@ int App::runECMMarin()
                 }
 
                 if (duration_cast<seconds>(now - last_save).count() >= backup_period) { double elapsed = duration<double>(now - t0).count() + saved_et; save_ckpt((uint32_t)(i + 1), elapsed); last_save = now; }
-                if (interrupted) { double elapsed = duration<double>(now - t0).count() + saved_et; save_ckpt((uint32_t)(i + 1), elapsed); std::cout<<"[ECM] Interrupted at curve "<<(c+1)<<", iter "<<(i+1)<<"/"<<total_bits<<""; if (guiServer_) { std::ostringstream oss; oss<<"[ECM] Interrupted at curve "<<(c+1)<<", iter "<<(i+1)<<"/"<<total_bits; guiServer_->appendLog(oss.str()); } curves_tested_for_found=(uint32_t)(c); options.curves_tested_for_found=(uint32_t)(c); write_result(); publish_json(); delete eng; return 0; }
+                if (interrupted) { double elapsed = duration<double>(now - t0).count() + saved_et; save_ckpt((uint32_t)(i + 1), elapsed); std::cout<<"[ECM] Interrupted at curve "<<(c+1)<<", iter "<<(i+1)<<"/"<<total_bits<<""; if (guiServer_) { std::ostringstream oss; oss<<"[ECM] Interrupted at curve "<<(c+1)<<", iter "<<(i+1)<<"/"<<total_bits; guiServer_->appendLog(oss.str()); } curves_tested_for_found=(uint32_t)(c); options.curves_tested_for_found=(uint32_t)(c); write_result(); publish_json(); return 0; }
             }
             std::cout<<std::endl;
             mpz_class gg;
@@ -2059,7 +2062,7 @@ int App::runECMMarin()
 
                     if (!resume_this_chunk) {
                         int setup_rc = setup_te_stage2_base();
-                        if (setup_rc == 2) { delete eng; return 0; }
+                        if (setup_rc == 2) { return 0; }
                         if (setup_rc == 1) {
                             handled_known_factor = true;
                             break;
@@ -2125,7 +2128,7 @@ int App::runECMMarin()
                     if (gz > 1 && gz < N) {
                         std::cout << std::endl;
                         int factor_rc = publish_stage2_factor(gz);
-                        if (factor_rc == 2) { delete eng; return 0; }
+                        if (factor_rc == 2) { return 0; }
                         handled_known_factor = true;
                         break;
                     }
@@ -2153,14 +2156,14 @@ int App::runECMMarin()
                             guiServer_->appendLog(oss.str());
                         }
                         save_ckpt2(s2_idx, elapsed, (uint32_t)primesS2_v.size());
-                        delete eng;
+                        
                         return 0;
                     }
                 }
                 std::cout << std::endl;
 
                 if (stop_after_chunk) {
-                    delete eng;
+                    
                     return 0;
                 }
                 if (handled_known_factor) {
@@ -2221,7 +2224,7 @@ auto setup_stage2_base = [&]() -> int {
 
             if (!resume_stage2) {
                 int setup_rc = setup_stage2_base();
-                if (setup_rc == 2) { delete eng; return 0; }
+                if (setup_rc == 2) { return 0; }
                 if (setup_rc == 1) continue;
                 if (setup_rc < 0) {
                     continue;
@@ -2328,7 +2331,7 @@ auto setup_stage2_base = [&]() -> int {
                                 << " (checkpoint inside chunk)";
                             guiServer_->appendLog(oss.str());
                         }
-                        delete eng;
+                        
                         return 0;
                     }
                 }
@@ -2372,7 +2375,7 @@ auto setup_stage2_base = [&]() -> int {
                     if (gz > 1 && gz < N) {
                         std::cout << std::endl;
                         int factor_rc = publish_stage2_factor(gz);
-                        if (factor_rc == 2) { delete eng; return 0; }
+                        if (factor_rc == 2) { return 0; }
                         next_curve_after_stage2 = true;
                         break;
                     }
@@ -2383,7 +2386,7 @@ auto setup_stage2_base = [&]() -> int {
                         mpz_class gg_hit = result_factor > 1 ? result_factor : gz;
                         std::cout << std::endl;
                         int factor_rc = publish_stage2_factor(gg_hit);
-                        if (factor_rc == 2) { delete eng; return 0; }
+                        if (factor_rc == 2) { return 0; }
                         next_curve_after_stage2 = true;
                         break;
                     }
@@ -2423,7 +2426,7 @@ auto setup_stage2_base = [&]() -> int {
                             << " prime-index " << s2_idx << "/" << primesS2_v.size();
                         guiServer_->appendLog(oss.str());
                     }
-                    delete eng;
+                    
                     return 0;
                 }
             }
@@ -2453,7 +2456,7 @@ auto setup_stage2_base = [&]() -> int {
             bool found2 = (gg2 > 1 && gg2 < N);
             if (found2) {
                 int factor_rc = publish_stage2_factor(gg2);
-                if (factor_rc == 2) { delete eng; return 0; }
+                if (factor_rc == 2) { return 0; }
                 continue;
             }
             }
@@ -2461,9 +2464,9 @@ auto setup_stage2_base = [&]() -> int {
 
         std::error_code ec; fs::remove(ckpt_file, ec); fs::remove(ckpt_file + ".old", ec); fs::remove(ckpt_file + ".new", ec);
         { std::ostringstream fin; fin<<"[ECM] Curve "<<(c+1)<<"/"<<curves<<" done"; std::cout<<fin.str()<<std::endl; if (guiServer_) guiServer_->appendLog(fin.str()); }
-        // Engine reused across curves (hoisted); deleted once after the loop.
+        // Engine reused across curves (hoisted); freed automatically by eng_owner (RAII).
     }
-    delete eng;
+    
 
     if (result_status != "found") {
         std::cout<<"[ECM] No factor found"<<std::endl;
