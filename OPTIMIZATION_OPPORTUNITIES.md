@@ -160,14 +160,26 @@ the runtime-capability / RAII cleanup).
 
 ### Latency score
 
+`baseline` = pristine upstream (`6abe217`, pre-M6/ECM/cleanup); `current` = this
+branch's `prmers`. Controlled cold/warm runs:
+
 | workload | baseline | current | delta |
 |---|---|---|---|
-| **Lucas-Lehmer** `M216091 -ll` | 33.55 s  (≈6,440 IPS) | 33.49 s  (≈6,410 IPS) | **≈ 0% (no regression)** |
-| **ECM** `M9941 -b1 2000 -K 8` | 33.3 s | **24.1 s** | **−27%** |
+| **Lucas-Lehmer** `M216091 -ll` | 33.3 s  (≈6,440 IPS) | 33.5–34.0 s  (≈6,360 IPS) | **≈ 0% (within noise)** |
+| **ECM** `M9941 -b1 2000 -K 8` | 33.2 s (stable) | 30.2–33.2 s | **≈ 0% to small** |
 
-Both verdicts correct (LL → prime; ECM → identical work, no factor). The ECM
-win is the engine hoist removing K−1 per-curve engine rebuilds; LL is untouched
-on the hot path, so it holds at baseline.
+Both verdicts correct (LL → prime; ECM → identical work, no factor). The cleanup
+introduces **no regression** on either path.
+
+> **Correction (re-benchmarked after the cleanup):** an early reading showed ECM
+> at 24.1 s (**−27%**), but it **did not reproduce** under controlled cold/warm
+> runs — baseline is rock-stable at 33.2 s and current is 33.2 s cold / 30.2 s
+> warm. Apple's OpenCL driver caches compiled programs, so rebuilding the engine
+> per curve (baseline) costs nearly the same as building it once (hoist). The
+> hoist is still correct and removes redundant work — and would help more where
+> program compilation is *not* driver-cached (larger/varied FFT sizes) — but its
+> steady-state benefit **on this setup is small/noisy, not 27%.** The 24.1 s
+> figure was a cache/scheduling artifact.
 
 ### Per-experiment verdicts (hypotheses → tested facts)
 
@@ -176,8 +188,10 @@ on the hot path, so it holds at baseline.
 | **L1** Apple sync cadence | top win | **−24% (regression)** — Apple prefers frequent drains; hypothesis was backwards | ❌ rejected |
 | **L2** branchless reduce | faster butterfly | neutral | ❌ dropped (no benefit) |
 | **M6** unified-memory reads | fewer stalls | LL-neutral; shrinks checkpoint/Gerbicz stalls (not exercised by short runs) | ✅ kept |
-| **ECM hoist** (L3) | less per-curve overhead | **−27% ECM** | ✅ kept |
+| **ECM hoist** (L3) | less per-curve overhead | ≈neutral to small (initial −27% was a cache artifact, did not reproduce); correct, no downside | ✅ kept |
 
-Lesson: the audit's #1 pick (L1) was a regression on real silicon, while the
-unglamorous ECM-hoist + unified-memory changes are the keepers — **measure
-before merging.**
+Lesson: the audit's #1 pick (L1) was a regression on real silicon, and even the
+ECM-hoist's apparent −27% turned out to be a cache artifact — **measure (and
+re-measure, controlled) before trusting any number.** The kept changes (M6 +
+ECM hoist + the cleanup) are correctness/quality wins with no regression; the
+big LL speedups still require the deeper Tier-2/3 work.
